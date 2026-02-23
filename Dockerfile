@@ -82,7 +82,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     OPENBLAS_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
     FLAGS_call_stack_level=2 \
-    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_use_mkldnn=0
 
 # Dépendances système + Node.js 20
 RUN apt-get update && apt-get install -y --no-install-recommends \

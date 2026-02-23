@@ -28,6 +28,9 @@ import builtins
 # ── Tout vers stderr avant imports ────────────────────────────────────────────
 os.environ["FLAGS_call_stack_level"] = "2"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+# Désactive OneDNN/MKL-DNN : PP-OCRv5 server crash avec
+# "ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]"
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 _orig_print = builtins.print

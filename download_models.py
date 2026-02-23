@@ -11,6 +11,10 @@ import os
 import sys
 from pathlib import Path
 
+# Désactive OneDNN : PP-OCRv5 server crash à l'inférence sinon
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
 # ─── Model dirs ───────────────────────────────────────────────────────────────
 DET_DIR = os.environ.get("PPOCR_DET_DIR", "/models/ppocrv5/det")
 REC_DIR = os.environ.get("PPOCR_REC_DIR", "/models/ppocrv5/rec")
