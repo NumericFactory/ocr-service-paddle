@@ -28,6 +28,11 @@ const SUPPORTED_LANGS = new Set([
     "ara", "chi_sim", "chi_tra", "jpn", "kor", "rus",
 ]);
 
+// DPI : garde-fous (évite PDF->images énormes qui explosent RAM/CPU)
+const DEFAULT_DPI = Number(process.env.DEFAULT_DPI) || 300;
+const MIN_DPI = Number(process.env.MIN_DPI) || 120;
+const MAX_DPI = Number(process.env.MAX_DPI) || 400;
+
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
 function log(level, msg, extra = {}) {
@@ -71,8 +76,9 @@ class PythonWorker {
             env: { ...process.env, PYTHONUNBUFFERED: "1", FLAGS_call_stack_level: "2" },
         });
 
+        // ✅ IMPORTANT: ne pas écraser `msg` dans log()
         this.#proc.stderr.on("data", (d) =>
-            log("info", `worker-${this.#id} stderr`, { msg: d.toString().trim().slice(0, 500) })
+            log("info", `worker-${this.#id} stderr`, { stderr: d.toString().trim().slice(0, 2000) })
         );
 
         this.#rl = readline.createInterface({ input: this.#proc.stdout });
@@ -114,6 +120,7 @@ class PythonWorker {
     #onLine(line) {
         line = line.trim();
         if (!line) return;
+
         let msg;
         try { msg = JSON.parse(line); } catch {
             log("warn", `worker-${this.#id} non-JSON`, { line: line.slice(0, 200) });
@@ -133,6 +140,7 @@ class PythonWorker {
 
         const pending = this.#pending.get(msg.id);
         if (!pending) return;
+
         clearTimeout(pending.timer);
         this.#pending.delete(msg.id);
         this.#busy = false;
@@ -142,9 +150,11 @@ class PythonWorker {
         else pending.resolve({ text: msg.text ?? "", page_count: msg.page_count ?? null });
     }
 
-    async ocr(pdfPath) {
+    async ocr(pdfPath, { dpi, lang } = {}) {
         await this.#readyPromise;
+
         const id = randomBytes(8).toString("hex");
+
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.#pending.delete(id);
@@ -152,9 +162,16 @@ class PythonWorker {
                 this.#pool.onWorkerFree(this.#id);
                 reject(new Error(`OCR timed out after ${OCR_TIMEOUT_MS}ms`));
             }, OCR_TIMEOUT_MS);
+
             this.#busy = true;
             this.#pending.set(id, { resolve, reject, timer });
-            this.#proc.stdin.write(JSON.stringify({ id, pdf_path: pdfPath }) + "\n");
+
+            // ✅ On passe dpi et lang (lang peut être ignoré côté worker si tu n’en as pas besoin)
+            const payload = { id, pdf_path: pdfPath };
+            if (Number.isFinite(dpi)) payload.dpi = dpi;
+            if (typeof lang === "string" && lang.length) payload.lang = lang;
+
+            this.#proc.stdin.write(JSON.stringify(payload) + "\n");
         });
     }
 
@@ -167,7 +184,7 @@ class PythonWorker {
 
 class WorkerPool {
     #workers = [];
-    #queue = [];          // { pdfPath, resolve, reject, timer, reqId }
+    #queue = [];          // { pdfPath, opts, resolve, reject, timer, reqId }
     #restarting = new Set();
 
     async init(count) {
@@ -177,10 +194,12 @@ class WorkerPool {
             this.#workers.push(w);
             return w.start();
         });
+
         // On attend que AU MOINS 1 worker soit prêt avant d'ouvrir le serveur
         await Promise.any(starts).catch(() => {
             throw new Error("No worker could start");
         });
+
         // Les autres continuent en arrière-plan
         Promise.allSettled(starts).then(() =>
             log("info", `All ${count} workers started`)
@@ -192,6 +211,7 @@ class WorkerPool {
         if (this.#queue.length > 0) {
             const job = this.#queue.shift();
             clearTimeout(job.queueTimer);
+
             const worker = this.#workers.find(w => w.id === workerId && w.ready);
             if (worker) {
                 log("info", "dequeue job", { reqId: job.reqId, worker: workerId, queueRemaining: this.#queue.length });
@@ -206,6 +226,7 @@ class WorkerPool {
     onWorkerCrash(workerId) {
         if (this.#restarting.has(workerId)) return;
         this.#restarting.add(workerId);
+
         setTimeout(async () => {
             log("info", `Restarting worker-${workerId}...`);
             const worker = this.#workers.find(w => w.id === workerId);
@@ -218,7 +239,6 @@ class WorkerPool {
                 }
             }
             this.#restarting.delete(workerId);
-            // Drainer la queue si des jobs attendaient
             this.#drainQueue();
         }, 2000);
     }
@@ -234,19 +254,17 @@ class WorkerPool {
     }
 
     #dispatch(worker, job) {
-        worker.ocr(job.pdfPath)
+        worker.ocr(job.pdfPath, job.opts)
             .then(job.resolve)
             .catch(job.reject);
     }
 
-    async run(pdfPath, reqId) {
-        // Chercher un worker libre
+    async run(pdfPath, reqId, opts) {
         const freeWorker = this.#workers.find(w => w.ready && !w.busy);
         if (freeWorker) {
-            return freeWorker.ocr(pdfPath);
+            return freeWorker.ocr(pdfPath, opts);
         }
 
-        // Tous occupés → mise en queue
         if (this.#queue.length >= QUEUE_MAX_SIZE) {
             throw Object.assign(new Error("Queue full, server overloaded"), { status: 503 });
         }
@@ -260,7 +278,7 @@ class WorkerPool {
                 reject(new Error(`Job queued too long (>${OCR_TIMEOUT_MS}ms)`));
             }, OCR_TIMEOUT_MS);
 
-            this.#queue.push({ pdfPath, resolve, reject, queueTimer, reqId });
+            this.#queue.push({ pdfPath, opts, resolve, reject, queueTimer, reqId });
         });
     }
 
@@ -291,14 +309,29 @@ function sanitizeLang(raw) {
     return lang;
 }
 
+function sanitizeDpi(raw) {
+    if (raw === undefined || raw === null || raw === "") return DEFAULT_DPI;
+    const dpi = Number(raw);
+    if (!Number.isFinite(dpi)) {
+        throw Object.assign(new Error(`Invalid dpi: '${raw}'`), { status: 400 });
+    }
+    if (dpi < MIN_DPI || dpi > MAX_DPI) {
+        throw Object.assign(
+            new Error(`dpi out of range (${MIN_DPI}-${MAX_DPI}). Got ${dpi}`),
+            { status: 400 }
+        );
+    }
+    return Math.round(dpi);
+}
+
 // ─── OCR pipeline ─────────────────────────────────────────────────────────────
 
-async function runOcr({ buffer, reqId }) {
+async function runOcr({ buffer, reqId, opts }) {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ocr-"));
     const inPdf = path.join(tmpDir, "input.pdf");
     try {
         await fs.writeFile(inPdf, buffer);
-        return await pool.run(inPdf, reqId);
+        return await pool.run(inPdf, reqId, opts);
     } finally {
         fs.rm(tmpDir, { recursive: true, force: true }).catch(() => { });
     }
@@ -333,17 +366,35 @@ app.post("/ocr", upload.single("file"), async (req, res) => {
         return res.status(415).json({ error: "File does not appear to be a valid PDF" });
 
     let lang;
+    let dpi;
+
     try { lang = sanitizeLang(req.query.lang || "fra"); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    try { dpi = sanitizeDpi(req.query.dpi); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
 
     const t0 = Date.now();
     try {
-        const result = await runOcr({ buffer: req.file.buffer, reqId });
-        log("info", "ocr done", { reqId, pages: result.page_count, chars: result.text.length, ms: Date.now() - t0 });
+        const result = await runOcr({
+            buffer: req.file.buffer,
+            reqId,
+            opts: { dpi, lang },
+        });
+
+        log("info", "ocr done", {
+            reqId,
+            lang,
+            dpi,
+            pages: result.page_count,
+            chars: result.text.length,
+            ms: Date.now() - t0
+        });
+
         res.json(result);
     } catch (e) {
         const status = e.status || 500;
-        log("error", "ocr failed", { reqId, error: e.message, ms: Date.now() - t0 });
+        log("error", "ocr failed", { reqId, lang, dpi, error: e.message, ms: Date.now() - t0 });
         res.status(status).json({ error: e.message });
     }
 });
