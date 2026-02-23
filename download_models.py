@@ -13,6 +13,6 @@ PaddleOCR(
     use_angle_cls=True,
     use_gpu=False,
     show_log=False,
-    lang="fr",          # modèle multilingue Europe occidentale (latin script)
+    #lang="fr",          # modèle multilingue Europe occidentale (latin script)
 )
 print("All PaddleOCR models downloaded successfully.")
