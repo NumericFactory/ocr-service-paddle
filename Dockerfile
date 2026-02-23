@@ -1,15 +1,12 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Stage 1 : node-deps (si tu as un front)
+# Stage 1 : node-deps
 # ──────────────────────────────────────────────────────────────────────────────
 FROM node:20-bookworm-slim AS node-deps
+
 WORKDIR /app
-
-# (Optionnel) si tu as package.json/package-lock.json
-# COPY package*.json ./
-# RUN npm ci
-
-# COPY . .
-# RUN npm run build
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \
+    && npm cache clean --force
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -24,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLEOCR_HOME=/models \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Déps système minimales (certs + curl + libs souvent nécessaires)
+# Dépendances système minimales
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -36,21 +33,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# ⚠️ Important pour éviter des segfault/free() invalid pointer (souvent OpenMP)
-# - force OpenBLAS en mono-thread au build
-# - évite les sur-parallélisations dans les containers
+# ⚠️ Évite les segfault/free() invalid pointer (OpenMP / OpenBLAS)
 ENV OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1
 
-# Installe PaddlePaddle + PaddleOCR (PP-OCRv5)
-# NOTE: ajuste les versions si besoin, mais garde-les compatibles entre elles.
+# Installe PaddlePaddle + PaddleOCR (PP-OCRv5) + PyMuPDF
 RUN pip install --no-cache-dir "paddlepaddle==3.3.0" \
     && pip install --no-cache-dir "paddleocr==3.4.0" \
     && pip install --no-cache-dir "pymupdf==1.24.10"
 
-# ─── Téléchargement des modèles PP-OCRv5 (server) + orientation ───────────────
+# Téléchargement des modèles PP-OCRv5 (server) + orientation
 RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
     && curl -L --retry 3 --retry-delay 2 -o /tmp/det.tar \
     "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_det_infer.tar" \
@@ -65,9 +59,6 @@ RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
     && tar -xf /tmp/cls.tar -C /models/ppocrv5/cls --strip-components=1 \
     && rm -f /tmp/cls.tar
 
-# (Optionnel) si tu veux garder ton script (mais NE PAS l'exécuter au build si ça crash)
-COPY download_models.py /app/download_models.py
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 3 : runtime (image finale)
@@ -75,7 +66,9 @@ COPY download_models.py /app/download_models.py
 FROM python:3.11-slim-bookworm AS runtime
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    NODE_ENV=production \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PADDLEOCR_HOME=/models \
     OMP_NUM_THREADS=1 \
@@ -83,24 +76,40 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OPENBLAS_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1
 
+# Dépendances système + Node.js 20
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
+    wget \
+    gnupg \
     libgomp1 \
     libglib2.0-0 \
     libgl1 \
     libxrender1 \
     libxext6 \
-    && rm -rf /var/lib/apt/lists/*
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Libs python + modèles depuis python-deps
+# Libs Python + modèles depuis python-deps
 COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=python-deps /usr/local/bin /usr/local/bin
 COPY --from=python-deps /models /models
 
-# Ton code app
-# COPY . /app
+# Utilisateur non-root
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser
 
-# Exemple : lance ton worker OCR (à adapter au nom de ton fichier)
-# CMD ["python", "/app/ocr_worker.py"]
+# Code app + dépendances Node
+COPY --from=node-deps /app/node_modules ./node_modules
+COPY server.js ocr_worker.py ./
+RUN chown -R appuser:appgroup /app
 
-CMD ["python", "-c", "print('Container ready. Models in /models/ppocrv5')"]
+USER appuser
+STOPSIGNAL SIGTERM
+
+# start-period élevé : les N workers PaddleOCR chargent leur modèle au boot
+HEALTHCHECK --interval=20s --timeout=5s --start-period=180s --retries=5 \
+    CMD wget -qO- http://localhost:3000/health | grep -q '"ok":true' || exit 1
+
+CMD ["node", "server.js"]
