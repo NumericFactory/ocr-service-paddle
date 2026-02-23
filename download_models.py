@@ -9,7 +9,10 @@ from paddleocr import PaddleOCR
 
 print("Downloading PaddleOCR models...")
 PaddleOCR(
-    use_textline_orientation=True,  # remplace use_angle_cls
-    device="cpu",                   # remplace use_gpu=False
+    #use_textline_orientation=True,  # remplace use_angle_cls
+    #device="cpu",                   # remplace use_gpu=False
+    use_angle_cls=True,
+    lang="fr",   # si tu veux du FR par défaut
+    use_gpu=False,
 )
 print("All PaddleOCR models downloaded successfully.")

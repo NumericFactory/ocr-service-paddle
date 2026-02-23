@@ -47,28 +47,35 @@ def load_model():
 
 def ocr_pdf(model, pdf_path):
     """Convertit un PDF en texte via PaddleOCR (page par page)."""
-    import fitz  # PyMuPDF — pour rasteriser chaque page du PDF
+    import fitz  # PyMuPDF
+    import numpy as np
+    import cv2
 
     doc = fitz.open(pdf_path)
     page_count = len(doc)
     pages_text = []
 
-    for page in doc:
-        # Rasteriser la page en image (300 DPI)
-        mat = fitz.Matrix(300 / 72, 300 / 72)
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-        img_bytes = pix.tobytes("png")
+    # 300 DPI
+    mat = fitz.Matrix(300 / 72, 300 / 72)
 
-        # PaddleOCR accepte directement des bytes d'image
-        result = model.ocr(img_bytes)
+    for page in doc:
+        pix = page.get_pixmap(matrix=mat, alpha=False)  # alpha=False => fond opaque
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+
+        # PyMuPDF -> souvent RGB ; Paddle/OpenCV manipulent souvent BGR
+        if pix.n == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        elif pix.n == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+        result = model.ocr(img, cls=True)
 
         lines = []
         if result:
             for res_page in result:
-                if res_page is None:
+                if not res_page:
                     continue
                 for line in res_page:
-                    # line = [[coords], [text, confidence]]
                     text = line[1][0].strip()
                     if text:
                         lines.append(text)
