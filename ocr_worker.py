@@ -8,6 +8,13 @@ Protocole :
   stdout → {"id": "abc", "text": "...", "page_count": N}
          | {"id": "abc", "error": "message"}
   stdout → {"ready": true}  (au démarrage, une seule fois)
+
+Options (env) :
+  OCR_LANG        : "fr" (défaut) / "en" / ...
+  OCR_DPI         : 300 (défaut)
+  PPOCR_DET_DIR   : /models/ppocrv5/det (défaut)
+  PPOCR_REC_DIR   : /models/ppocrv5/rec (défaut)
+  PPOCR_CLS_DIR   : /models/ppocrv5/cls (défaut)
 """
 
 import sys
@@ -44,6 +51,9 @@ def load_model(lang: str = "fr"):
     Charge PaddleOCR en restant compatible avec plusieurs versions :
     - anciennes: use_angle_cls / use_gpu
     - nouvelles: use_textline_orientation / device
+
+    Si des modèles custom (PP-OCRv5) sont présents dans /models/ppocrv5,
+    on force det/rec/cls_model_dir pour éviter le téléchargement à l'exécution.
     """
     _orig_print(
         f"[worker pid={os.getpid()}] Loading PaddleOCR model (lang={lang})...",
@@ -53,17 +63,44 @@ def load_model(lang: str = "fr"):
 
     from paddleocr import PaddleOCR
 
+    det_dir = os.getenv("PPOCR_DET_DIR", "/models/ppocrv5/det")
+    rec_dir = os.getenv("PPOCR_REC_DIR", "/models/ppocrv5/rec")
+    cls_dir = os.getenv("PPOCR_CLS_DIR", "/models/ppocrv5/cls")
+
+    have_custom = all(os.path.isdir(p) for p in (det_dir, rec_dir, cls_dir))
+
+    kwargs_common = dict(lang=lang)
+
+    if have_custom:
+        _orig_print(
+            f"[worker pid={os.getpid()}] Using custom PP-OCR model dirs:\n"
+            f"  det={det_dir}\n  rec={rec_dir}\n  cls={cls_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+        kwargs_common.update(
+            det_model_dir=det_dir,
+            rec_model_dir=rec_dir,
+            cls_model_dir=cls_dir,
+        )
+    else:
+        _orig_print(
+            f"[worker pid={os.getpid()}] No custom model dirs found; using PaddleOCR defaults.",
+            file=sys.stderr,
+            flush=True,
+        )
+
     # On essaie d'abord la nouvelle API, sinon on fallback vers l'ancienne.
     try:
         model = PaddleOCR(
-            lang=lang,
+            **kwargs_common,
             use_textline_orientation=True,  # nouvelle API (remplace use_angle_cls)
             device="cpu",                   # nouvelle API (remplace use_gpu=False)
         )
     except TypeError:
         # Fallback ancienne API
         model = PaddleOCR(
-            lang=lang,
+            **kwargs_common,
             use_angle_cls=True,
             use_gpu=False,
         )
@@ -92,7 +129,6 @@ def ocr_pdf(model, pdf_path: str, dpi: int = 300):
     """Convertit un PDF en texte via PaddleOCR (page par page)."""
     import fitz  # PyMuPDF
     import numpy as np
-    import cv2
 
     doc = fitz.open(pdf_path)
     page_count = len(doc)
@@ -111,11 +147,16 @@ def ocr_pdf(model, pdf_path: str, dpi: int = 300):
         # pix.samples = bytes
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
 
-        # Normalize en BGR (OpenCV)
-        if pix.n == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        elif pix.n == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        # IMPORTANT:
+        # - pix.get_pixmap(alpha=False) renvoie généralement du RGB (n==3)
+        # - PaddleOCR accepte des numpy arrays.
+        # Si tu veux absolument du BGR (sans OpenCV), tu peux inverser les canaux :
+        # img = img[:, :, ::-1]
+        #
+        # Ici on garde RGB pour éviter OpenCV (souvent source de crash quand les wheels opencv se mélangent).
+        if pix.n == 4:
+            # Sécurité si jamais (devrait être rare avec alpha=False)
+            img = img[:, :, :3]
 
         result = ocr_image(model, img)
 
@@ -145,7 +186,6 @@ def ocr_pdf(model, pdf_path: str, dpi: int = 300):
 
 def main():
     try:
-        # Mets "fr" si tes docs sont FR ; sinon "en" ou autre
         model = load_model(lang=os.getenv("OCR_LANG", "fr"))
     except Exception as e:
         emit({"ready": False, "error": f"Model load failed: {e}"})
@@ -164,8 +204,8 @@ def main():
             req_id = req.get("id")
             pdf_path = req["pdf_path"]
 
-            # Optionnel: dpi configurable depuis la requête (fallback 300)
-            dpi = int(req.get("dpi", 300))
+            # DPI configurable depuis la requête (fallback env OCR_DPI puis 300)
+            dpi = int(req.get("dpi", os.getenv("OCR_DPI", 300)))
 
             text, page_count = ocr_pdf(model, pdf_path, dpi=dpi)
             emit({"id": req_id, "text": text, "page_count": page_count})

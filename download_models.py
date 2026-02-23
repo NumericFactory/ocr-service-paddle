@@ -1,18 +1,43 @@
-#!/usr/bin/env python3
-"""Pre-download ALL PaddleOCR models used at runtime."""
 import os
+from pathlib import Path
 
-os.environ["FLAGS_call_stack_level"] = "2"
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+def check_dir(p: str) -> None:
+    path = Path(p)
+    if not path.exists():
+        raise SystemExit(f"[ERROR] Missing: {p}")
+    if not any(path.iterdir()):
+        raise SystemExit(f"[ERROR] Empty directory: {p}")
+    print(f"[OK] {p}")
 
-from paddleocr import PaddleOCR
+def main():
+    det = os.environ.get("PPOCR_DET_DIR", "/models/ppocrv5/det")
+    rec = os.environ.get("PPOCR_REC_DIR", "/models/ppocrv5/rec")
+    cls = os.environ.get("PPOCR_CLS_DIR", "/models/ppocrv5/cls")
 
-print("Downloading PaddleOCR models...")
-PaddleOCR(
-    use_textline_orientation=True,  # remplace use_angle_cls
-    device="cpu",                   # remplace use_gpu=False
-    #use_angle_cls=True,
-    lang="fr",   # si tu veux du FR par défaut
-    #use_gpu=False,
-)
-print("All PaddleOCR models downloaded successfully.")
+    check_dir(det)
+    check_dir(rec)
+    check_dir(cls)
+
+    # Import optionnel (à éviter pendant le build si tu as des soucis OpenCV)
+    # Ici c'est juste un exemple d'init PaddleOCR en pointant sur tes modèles.
+    try:
+        from paddleocr import PaddleOCR
+
+        ocr = PaddleOCR(
+            use_angle_cls=True,
+            det_model_dir=det,
+            rec_model_dir=rec,
+            cls_model_dir=cls,
+            lang="en",     # adapte à ton cas
+            use_gpu=False,
+        )
+        print("[OK] PaddleOCR init done (PP-OCRv5 paths).")
+        # Tu peux faire un test:
+        # res = ocr.ocr("test.jpg")
+        # print(res)
+    except Exception as e:
+        print("[WARN] PaddleOCR import/init failed (this is OK if you only wanted model download).")
+        print("Reason:", repr(e))
+
+if __name__ == "__main__":
+    main()
