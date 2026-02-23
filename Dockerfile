@@ -20,8 +20,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PADDLEOCR_HOME=/models \
-    # PaddleX stocke ses modèles additionnels ici
-    PADDLEX_HOME=/paddlex_cache \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
@@ -63,7 +61,7 @@ RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
 
 # ─── Pré-chauffe PaddleOCR au build → télécharge UVDoc, PP-LCNet_x1_0_doc_ori
 # et tout autre modèle auxiliaire que paddleocr==3.4.0 charge au premier appel.
-# Résultat stocké dans /paddlex_cache (baked dans l'image).
+# PaddleX ignore PADDLEX_HOME et écrit dans /root/.paddlex (HOME du build).
 COPY download_models.py /app/download_models.py
 RUN python3 /app/download_models.py
 
@@ -79,7 +77,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PADDLEOCR_HOME=/models \
-    PADDLEX_HOME=/paddlex_cache \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
@@ -109,18 +106,18 @@ COPY --from=python-deps /usr/local/bin /usr/local/bin
 # Modèles PP-OCRv5 baked
 COPY --from=python-deps /models /models
 
-# Cache PaddleX (UVDoc, PP-LCNet_x1_0_doc_ori, etc. téléchargés au build)
-COPY --from=python-deps /paddlex_cache /paddlex_cache
-
-# Utilisateur non-root
+# Utilisateur non-root (créé avant le COPY pour pouvoir chown en une passe)
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser \
-    && chown -R appuser:appgroup /paddlex_cache
+    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser
+
+# Cache PaddleX baked au build — PaddleX écrit dans $HOME/.paddlex
+# On le place donc dans le home de appuser : trouvé automatiquement à runtime.
+COPY --from=python-deps /root/.paddlex /home/appuser/.paddlex
 
 # Code app + dépendances Node
 COPY --from=node-deps /app/node_modules ./node_modules
 COPY server.js ocr_worker.py ./
-RUN chown -R appuser:appgroup /app
+RUN chown -R appuser:appgroup /home/appuser /app
 
 USER appuser
 STOPSIGNAL SIGTERM
