@@ -18,7 +18,8 @@ import traceback
 import builtins
 
 # ── Tout vers stderr avant imports ────────────────────────────────────────────
-os.environ["FLAGS_call_stack_level"] = "2"   # réduit verbosité Paddle C++
+os.environ["FLAGS_call_stack_level"] = "2"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 _orig_print = builtins.print
@@ -35,14 +36,9 @@ def emit(obj):
 def load_model():
     _orig_print(f"[worker pid={os.getpid()}] Loading PaddleOCR model...", file=sys.stderr, flush=True)
     from paddleocr import PaddleOCR
-    # use_angle_cls=True : détecte l'orientation des lignes
-    # use_gpu=False      : CPU uniquement (pas de GPU dans le conteneur)
-    # show_log=False     : supprime les logs Paddle sur stderr
     model = PaddleOCR(
-        use_angle_cls=True,
-        use_gpu=False,
-        show_log=False,
-        lang="fr",          # modèle multilingue Europe occidentale
+        use_textline_orientation=True,  # remplace use_angle_cls
+        device="cpu",                   # remplace use_gpu=False
     )
     _orig_print(f"[worker pid={os.getpid()}] Ready.", file=sys.stderr, flush=True)
     return model
@@ -64,11 +60,11 @@ def ocr_pdf(model, pdf_path):
         img_bytes = pix.tobytes("png")
 
         # PaddleOCR accepte directement des bytes d'image
-        result = model.ocr(img_bytes, cls=True)
+        result = model.ocr(img_bytes)
 
         lines = []
         if result:
-            for res_page in result:          # result est une liste de pages
+            for res_page in result:
                 if res_page is None:
                     continue
                 for line in res_page:
