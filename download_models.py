@@ -1,43 +1,68 @@
+#!/usr/bin/env python3
+"""
+Pre-warms all PaddleOCR / PaddlePaddle models at Docker BUILD time.
+Run via: python3 /app/download_models.py
+
+This ensures that ALL models — including the extra PaddleX models that
+paddleocr==3.4.0 downloads on first use (PP-LCNet_x1_0_doc_ori, UVDoc, etc.)
+— are baked into the image and not fetched at container startup.
+"""
 import os
+import sys
 from pathlib import Path
 
+# ─── Model dirs ───────────────────────────────────────────────────────────────
+DET_DIR = os.environ.get("PPOCR_DET_DIR", "/models/ppocrv5/det")
+REC_DIR = os.environ.get("PPOCR_REC_DIR", "/models/ppocrv5/rec")
+CLS_DIR = os.environ.get("PPOCR_CLS_DIR", "/models/ppocrv5/cls")
+
+# ─── Sanity-check baked model dirs ────────────────────────────────────────────
 def check_dir(p: str) -> None:
     path = Path(p)
     if not path.exists():
         raise SystemExit(f"[ERROR] Missing: {p}")
     if not any(path.iterdir()):
         raise SystemExit(f"[ERROR] Empty directory: {p}")
-    print(f"[OK] {p}")
+    print(f"[OK] {p}", flush=True)
 
-def main():
-    det = os.environ.get("PPOCR_DET_DIR", "/models/ppocrv5/det")
-    rec = os.environ.get("PPOCR_REC_DIR", "/models/ppocrv5/rec")
-    cls = os.environ.get("PPOCR_CLS_DIR", "/models/ppocrv5/cls")
+print("=== Checking baked PP-OCRv5 model dirs ===", flush=True)
+check_dir(DET_DIR)
+check_dir(REC_DIR)
+check_dir(CLS_DIR)
 
-    check_dir(det)
-    check_dir(rec)
-    check_dir(cls)
+# ─── Init PaddleOCR with the NEW 3.4.0 API ────────────────────────────────────
+# This triggers ALL lazy model downloads (UVDoc, PP-LCNet_x1_0_doc_ori, etc.)
+# so they end up in $PADDLEX_HOME and are copied into the runtime image.
+print("=== Initializing PaddleOCR (will download auxiliary models) ===", flush=True)
+try:
+    from paddleocr import PaddleOCR
 
-    # Import optionnel (à éviter pendant le build si tu as des soucis OpenCV)
-    # Ici c'est juste un exemple d'init PaddleOCR en pointant sur tes modèles.
-    try:
-        from paddleocr import PaddleOCR
+    ocr = PaddleOCR(
+        lang="fr",
+        device="cpu",
+        use_textline_orientation=True,
+        text_detection_model_dir=DET_DIR,
+        text_recognition_model_dir=REC_DIR,
+        textline_orientation_model_dir=CLS_DIR,
+    )
+    print("[OK] PaddleOCR initialized with new API.", flush=True)
 
-        ocr = PaddleOCR(
-            use_angle_cls=True,
-            det_model_dir=det,
-            rec_model_dir=rec,
-            cls_model_dir=cls,
-            lang="en",     # adapte à ton cas
-            use_gpu=False,
-        )
-        print("[OK] PaddleOCR init done (PP-OCRv5 paths).")
-        # Tu peux faire un test:
-        # res = ocr.ocr("test.jpg")
-        # print(res)
-    except Exception as e:
-        print("[WARN] PaddleOCR import/init failed (this is OK if you only wanted model download).")
-        print("Reason:", repr(e))
+except TypeError as e:
+    # Fallback: old API (should not happen with paddleocr==3.4.0)
+    print(f"[WARN] New API failed ({e}), falling back to legacy API.", flush=True)
+    from paddleocr import PaddleOCR
+    ocr = PaddleOCR(
+        lang="fr",
+        use_angle_cls=True,
+        use_gpu=False,
+        det_model_dir=DET_DIR,
+        rec_model_dir=REC_DIR,
+        cls_model_dir=CLS_DIR,
+    )
+    print("[OK] PaddleOCR initialized with legacy API.", flush=True)
 
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    print(f"[ERROR] PaddleOCR init failed: {e}", flush=True)
+    sys.exit(1)
+
+print("=== All models ready. Build cache is warm. ===", flush=True)

@@ -10,7 +10,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Stage 2 : python-deps (lib + modèles PP-OCRv5)
+# Stage 2 : python-deps (lib + modèles PP-OCRv5 + cache PaddleX)
 # ──────────────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm AS python-deps
 WORKDIR /app
@@ -18,8 +18,16 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PADDLEOCR_HOME=/models \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    # PaddleX stocke ses modèles additionnels ici
+    PADDLEX_HOME=/paddlex_cache \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    FLAGS_call_stack_level=2 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
 # Dépendances système minimales
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,18 +41,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# ⚠️ Évite les segfault/free() invalid pointer (OpenMP / OpenBLAS)
-ENV OMP_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1 \
-    NUMEXPR_NUM_THREADS=1
-
 # Installe PaddlePaddle + PaddleOCR (PP-OCRv5) + PyMuPDF
 RUN pip install --no-cache-dir "paddlepaddle==3.3.0" \
     && pip install --no-cache-dir "paddleocr==3.4.0" \
     && pip install --no-cache-dir "pymupdf==1.24.10"
 
-# Téléchargement des modèles PP-OCRv5 (server) + orientation
+# ─── Téléchargement des modèles PP-OCRv5 (server) + orientation ───────────────
 RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
     && curl -L --retry 3 --retry-delay 2 -o /tmp/det.tar \
     "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_server_det_infer.tar" \
@@ -59,6 +61,12 @@ RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
     && tar -xf /tmp/cls.tar -C /models/ppocrv5/cls --strip-components=1 \
     && rm -f /tmp/cls.tar
 
+# ─── Pré-chauffe PaddleOCR au build → télécharge UVDoc, PP-LCNet_x1_0_doc_ori
+# et tout autre modèle auxiliaire que paddleocr==3.4.0 charge au premier appel.
+# Résultat stocké dans /paddlex_cache (baked dans l'image).
+COPY download_models.py /app/download_models.py
+RUN python3 /app/download_models.py
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 3 : runtime (image finale)
@@ -71,10 +79,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PADDLEOCR_HOME=/models \
+    PADDLEX_HOME=/paddlex_cache \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
-    NUMEXPR_NUM_THREADS=1
+    NUMEXPR_NUM_THREADS=1 \
+    FLAGS_call_stack_level=2 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
 # Dépendances système + Node.js 20
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -91,14 +102,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Libs Python + modèles depuis python-deps
+# Libs Python depuis python-deps
 COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=python-deps /usr/local/bin /usr/local/bin
+
+# Modèles PP-OCRv5 baked
 COPY --from=python-deps /models /models
+
+# Cache PaddleX (UVDoc, PP-LCNet_x1_0_doc_ori, etc. téléchargés au build)
+COPY --from=python-deps /paddlex_cache /paddlex_cache
 
 # Utilisateur non-root
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser
+    && useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser \
+    && chown -R appuser:appgroup /paddlex_cache
 
 # Code app + dépendances Node
 COPY --from=node-deps /app/node_modules ./node_modules
@@ -109,6 +126,7 @@ USER appuser
 STOPSIGNAL SIGTERM
 
 # start-period élevé : les N workers PaddleOCR chargent leur modèle au boot
+# (modèles en cache → plus rapide, mais loading reste lourd)
 HEALTHCHECK --interval=20s --timeout=5s --start-period=180s --retries=5 \
     CMD wget -qO- http://localhost:3000/health | grep -q '"ok":true' || exit 1
 

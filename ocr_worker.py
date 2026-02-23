@@ -15,6 +15,7 @@ Options (env) :
   PPOCR_DET_DIR   : /models/ppocrv5/det (défaut)
   PPOCR_REC_DIR   : /models/ppocrv5/rec (défaut)
   PPOCR_CLS_DIR   : /models/ppocrv5/cls (défaut)
+  PADDLEX_HOME    : /root/.paddlex (défaut PaddleX — override si non-root)
 """
 
 import sys
@@ -49,11 +50,13 @@ def emit(obj):
 def load_model(lang: str = "fr"):
     """
     Charge PaddleOCR en restant compatible avec plusieurs versions :
-    - anciennes: use_angle_cls / use_gpu
-    - nouvelles: use_textline_orientation / device
+    - paddleocr >= 3.4.0 : text_detection_model_dir / text_recognition_model_dir /
+                           textline_orientation_model_dir / use_textline_orientation / device
+    - paddleocr < 3.4.0  : det_model_dir / rec_model_dir / cls_model_dir /
+                           use_angle_cls / use_gpu
 
     Si des modèles custom (PP-OCRv5) sont présents dans /models/ppocrv5,
-    on force det/rec/cls_model_dir pour éviter le téléchargement à l'exécution.
+    on force les chemins pour éviter tout téléchargement à l'exécution.
     """
     _orig_print(
         f"[worker pid={os.getpid()}] Loading PaddleOCR model (lang={lang})...",
@@ -69,19 +72,12 @@ def load_model(lang: str = "fr"):
 
     have_custom = all(os.path.isdir(p) for p in (det_dir, rec_dir, cls_dir))
 
-    kwargs_common = dict(lang=lang)
-
     if have_custom:
         _orig_print(
             f"[worker pid={os.getpid()}] Using custom PP-OCR model dirs:\n"
             f"  det={det_dir}\n  rec={rec_dir}\n  cls={cls_dir}",
             file=sys.stderr,
             flush=True,
-        )
-        kwargs_common.update(
-            det_model_dir=det_dir,
-            rec_model_dir=rec_dir,
-            cls_model_dir=cls_dir,
         )
     else:
         _orig_print(
@@ -90,22 +86,31 @@ def load_model(lang: str = "fr"):
             flush=True,
         )
 
-    # On essaie d'abord la nouvelle API, sinon on fallback vers l'ancienne.
+    # ── Essai prioritaire : nouvelle API paddleocr >= 3.4.0 ──────────────────
     try:
-        model = PaddleOCR(
-            **kwargs_common,
-            use_textline_orientation=True,  # nouvelle API (remplace use_angle_cls)
-            device="cpu",                   # nouvelle API (remplace use_gpu=False)
-        )
+        kwargs = dict(lang=lang, use_textline_orientation=True, device="cpu")
+        if have_custom:
+            kwargs.update(
+                text_detection_model_dir=det_dir,
+                text_recognition_model_dir=rec_dir,
+                textline_orientation_model_dir=cls_dir,
+            )
+        model = PaddleOCR(**kwargs)
+        _orig_print(f"[worker pid={os.getpid()}] Ready (new API).", file=sys.stderr, flush=True)
+        return model
     except TypeError:
-        # Fallback ancienne API
-        model = PaddleOCR(
-            **kwargs_common,
-            use_angle_cls=True,
-            use_gpu=False,
-        )
+        pass  # paramètres inconnus → on tente l'ancienne API
 
-    _orig_print(f"[worker pid={os.getpid()}] Ready.", file=sys.stderr, flush=True)
+    # ── Fallback : ancienne API paddleocr < 3.4.0 ────────────────────────────
+    kwargs = dict(lang=lang, use_angle_cls=True, use_gpu=False)
+    if have_custom:
+        kwargs.update(
+            det_model_dir=det_dir,
+            rec_model_dir=rec_dir,
+            cls_model_dir=cls_dir,
+        )
+    model = PaddleOCR(**kwargs)
+    _orig_print(f"[worker pid={os.getpid()}] Ready (legacy API).", file=sys.stderr, flush=True)
     return model
 
 
