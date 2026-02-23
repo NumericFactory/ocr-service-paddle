@@ -57,7 +57,7 @@ RUN mkdir -p /models/ppocrv5/det /models/ppocrv5/rec /models/ppocrv5/cls \
     && tar -xf /tmp/rec.tar -C /models/ppocrv5/rec --strip-components=1 \
     && rm -f /tmp/rec.tar \
     && curl -L --retry 3 --retry-delay 2 -o /tmp/cls.tar \
-    "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-LCNet_x0_25_textline_ori_infer.tar" \
+    "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-LCNet_x1_0_textline_ori_infer.tar" \
     && tar -xf /tmp/cls.tar -C /models/ppocrv5/cls --strip-components=1 \
     && rm -f /tmp/cls.tar
 
