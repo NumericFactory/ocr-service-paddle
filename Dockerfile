@@ -26,8 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # PaddleOCR (CPU) + PyMuPDF (rasterisation PDF)
-RUN pip install paddlepaddle==2.6.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
-RUN pip install "paddleocr>=2.7.3" pymupdf
+#RUN pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+#RUN pip install "paddleocr>=2.7.3" pymupdf
+RUN pip install paddleocr pymupdf
 
 COPY download_models.py /tmp/download_models.py
 RUN python3 /tmp/download_models.py
