@@ -59,11 +59,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 # Les modèles PaddleOCR sont mis en cache dans ~/.paddleocr
-COPY --from=python-deps /root/.paddleocr /home/appuser/.paddleocr
+COPY --from=python-deps /root/.paddlex /home/appuser/.paddlex
 
 RUN groupadd --gid 1001 appgroup && \
     useradd --uid 1001 --gid appgroup --shell /bin/sh --create-home appuser \
-    && chown -R appuser:appgroup /home/appuser/.paddleocr
+    && chown -R appuser:appgroup /home/appuser/.paddlex
 
 # Variable d'environnement pour que PaddleOCR utilise le cache pré-téléchargé
 ENV HOME=/home/appuser
